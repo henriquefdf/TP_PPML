@@ -1,0 +1,12 @@
+# Core ML and Data Handling
+pandas==2.2.2
+scikit-learn==1.5.0
+numpy==1.26.4
+
+# Federated Learning Framework
+flwr==1.8.0
+
+# NLP Toolkit for Stopwords
+nltk==3.8.1
+
+# Notebook environment
