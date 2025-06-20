@@ -4,7 +4,8 @@ import flwr as fl
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.feature_extraction.text import TfidfVectorizer 
+from sklearn.feature_extraction.text import HashingVectorizer # CHANGE THIS LINE
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, precision_score, recall_score, f1_score
 
@@ -31,26 +32,59 @@ test_df = pd.read_csv('data/processed/test.csv')
 train_df['cleaned_message'] = train_df['cleaned_message'].fillna('')
 test_df['cleaned_message'] = test_df['cleaned_message'].fillna('')
 
-# Fit a global TF-IDF vectorizer on the entire training data
-vectorizer = TfidfVectorizer(max_features=3000)
-X_train_full_tfidf = vectorizer.fit_transform(train_df['cleaned_message'])
+# REPLACE THE OLD TF-IDF BLOCK WITH THIS
+# --- Researcher's Justification ---
+# Using HashingVectorizer to solve the data leakage from a centralized vocabulary.
+# Each client can call `.transform()` on its local data and get a consistent
+# representation without any pre-shared knowledge, adhering to a stricter privacy model.
+# n_features=3000 is chosen to match our previous feature space size.
+# ------------------------------------
+vectorizer = HashingVectorizer(n_features=3000)
+
+X_train_full_hashed = vectorizer.transform(train_df['cleaned_message'])
 y_train_full = train_df['label'].values
 
-# Transform the test set using the same vectorizer for consistent evaluation
-X_test_tfidf = vectorizer.transform(test_df['cleaned_message'])
+# Transform the test set for consistent evaluation
+X_test_hashed = vectorizer.transform(test_df['cleaned_message'])
 y_test = test_df['label'].values
-
-# Partition the training data among clients
+# --- Researcher's Justification ---
+# This block simulates a Non-IID data distribution, specifically "label distribution skew".
+# We assign the vast majority of spam messages to a small number of clients (2 in this case).
+# The remaining clients get a dataset that is overwhelmingly "ham". This mimics a real-world
+# scenario where some users are targeted by spam campaigns while most are not. This is a
+# much harder challenge for FedAvg.
+# ------------------------------------
 NUM_CLIENTS = 10
-train_indices = list(range(len(train_df)))
-# We shuffle the indices to simulate a random distribution of data
-np.random.shuffle(train_indices)
-partition_size = len(train_indices) // NUM_CLIENTS
-client_data_indices = [
-    train_indices[i * partition_size: (i + 1) * partition_size]
-    for i in range(NUM_CLIENTS)
-]
-print(f"Data partitioned for {NUM_CLIENTS} clients.")
+NUM_SPAM_HEAVY_CLIENTS = 2
+
+# Separate indices by label
+ham_indices = train_df[train_df['label'] == 0].index.tolist()
+spam_indices = train_df[train_df['label'] == 1].index.tolist()
+
+np.random.shuffle(ham_indices)
+np.random.shuffle(spam_indices)
+
+client_data_indices = [[] for _ in range(NUM_CLIENTS)]
+
+# Assign most spam to the first few clients
+spam_per_heavy_client = len(spam_indices) // NUM_SPAM_HEAVY_CLIENTS
+for i in range(NUM_SPAM_HEAVY_CLIENTS):
+    start = i * spam_per_heavy_client
+    end = (i + 1) * spam_per_heavy_client
+    client_data_indices[i].extend(spam_indices[start:end])
+
+# Distribute ham evenly among all clients to ensure they all have some data
+ham_per_client = len(ham_indices) // NUM_CLIENTS
+for i in range(NUM_CLIENTS):
+    start = i * ham_per_client
+    end = (i + 1) * ham_per_client
+    client_data_indices[i].extend(ham_indices[start:end])
+    np.random.shuffle(client_data_indices[i]) # Shuffle to mix ham and spam within client data
+
+print("--- Created Non-IID data partition ---")
+for i in range(NUM_CLIENTS):
+    labels = train_df.loc[client_data_indices[i]]['label']
+    print(f"Client {i}: {len(labels)} samples, Spam ratio: {labels.mean():.2f}")
 
 # 2. Define the Flower Client
 # --- Researcher's Justification ---
@@ -64,16 +98,16 @@ print(f"Data partitioned for {NUM_CLIENTS} clients.")
 # for a single epoch in each round, starting with the parameters from the server.
 # ------------------------------------
 class SmsSpamClient(fl.client.NumPyClient):
-    def __init__(self, client_id, X_train_tfidf, y_train, data_indices):
+    def __init__(self, client_id, X_train_hashed, y_train, data_indices):
         self.client_id = client_id
-        self.X_train_tfidf = X_train_tfidf
+        self.X_train_hashed = X_train_hashed # Rename for clarity
         self.y_train = y_train
         self.data_indices = data_indices
         self.model = LogisticRegression(
             class_weight='balanced', max_iter=100, warm_start=True, random_state=42
         )
         # Set initial parameters to zeros
-        self.model.coef_ = np.zeros((1, self.X_train_tfidf.shape[1]))
+        self.model.coef_ = np.zeros((1, self.X_train_hashed.shape[1])) 
         self.model.intercept_ = np.zeros(1)
         self.model.classes_ = np.array([0, 1])
 
@@ -89,9 +123,9 @@ class SmsSpamClient(fl.client.NumPyClient):
     def fit(self, parameters, config):
         """Train model on the locally held dataset."""
         self.set_parameters(parameters)
-        
+
         # Get this client's partition of data
-        client_X = self.X_train_tfidf[self.data_indices]
+        client_X = self.X_train_hashed[self.data_indices] # Use hashed data
         client_y = self.y_train[self.data_indices]
         
         # Train the model for one local epoch
@@ -116,7 +150,8 @@ class SmsSpamClient(fl.client.NumPyClient):
 
 def client_fn(cid: str) -> fl.client.Client:
     """Create a Flower client for a given client ID."""
-    return SmsSpamClient(cid, X_train_full_tfidf, y_train_full, client_data_indices[int(cid)])
+    # Pass the hashed data
+    return SmsSpamClient(cid, X_train_full_hashed, y_train_full, client_data_indices[int(cid)])
 
 # 3. Define the Server-Side Evaluation Function
 # --- Researcher's Justification ---
@@ -135,11 +170,11 @@ def get_evaluate_fn():
         model.intercept_ = parameters[1]
 
         # Predict on the centralized test set
-        y_pred = model.predict(X_test_tfidf)
+        y_pred = model.predict(X_test_hashed)
 
         # Calculate all relevant metrics
-        loss = log_loss(y_test, model.predict_proba(X_test_tfidf))
-        accuracy = model.score(X_test_tfidf, y_test)
+        loss = log_loss(y_test, model.predict_proba(X_test_hashed))
+        accuracy = model.score(X_test_hashed, y_test)
         # Use pos_label=1 to calculate metrics for the 'spam' class
         precision = precision_score(y_test, y_pred, pos_label=1, zero_division=0)
         recall = recall_score(y_test, y_pred, pos_label=1, zero_division=0)

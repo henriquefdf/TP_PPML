@@ -40,17 +40,44 @@ y_train_full = train_df['label'].values
 X_test_tfidf = vectorizer.transform(test_df['cleaned_message'])
 y_test = test_df['label'].values
 
-# Partition the training data among clients
+# --- Researcher's Justification ---
+# This block simulates a Non-IID data distribution, specifically "label distribution skew".
+# We assign the vast majority of spam messages to a small number of clients (2 in this case).
+# The remaining clients get a dataset that is overwhelmingly "ham". This mimics a real-world
+# scenario where some users are targeted by spam campaigns while most are not. This is a
+# much harder challenge for FedAvg.
+# ------------------------------------
 NUM_CLIENTS = 10
-train_indices = list(range(len(train_df)))
-# We shuffle the indices to simulate a random distribution of data
-np.random.shuffle(train_indices)
-partition_size = len(train_indices) // NUM_CLIENTS
-client_data_indices = [
-    train_indices[i * partition_size: (i + 1) * partition_size]
-    for i in range(NUM_CLIENTS)
-]
-print(f"Data partitioned for {NUM_CLIENTS} clients.")
+NUM_SPAM_HEAVY_CLIENTS = 2
+
+# Separate indices by label
+ham_indices = train_df[train_df['label'] == 0].index.tolist()
+spam_indices = train_df[train_df['label'] == 1].index.tolist()
+
+np.random.shuffle(ham_indices)
+np.random.shuffle(spam_indices)
+
+client_data_indices = [[] for _ in range(NUM_CLIENTS)]
+
+# Assign most spam to the first few clients
+spam_per_heavy_client = len(spam_indices) // NUM_SPAM_HEAVY_CLIENTS
+for i in range(NUM_SPAM_HEAVY_CLIENTS):
+    start = i * spam_per_heavy_client
+    end = (i + 1) * spam_per_heavy_client
+    client_data_indices[i].extend(spam_indices[start:end])
+
+# Distribute ham evenly among all clients to ensure they all have some data
+ham_per_client = len(ham_indices) // NUM_CLIENTS
+for i in range(NUM_CLIENTS):
+    start = i * ham_per_client
+    end = (i + 1) * ham_per_client
+    client_data_indices[i].extend(ham_indices[start:end])
+    np.random.shuffle(client_data_indices[i]) # Shuffle to mix ham and spam within client data
+
+print("--- Created Non-IID data partition ---")
+for i in range(NUM_CLIENTS):
+    labels = train_df.loc[client_data_indices[i]]['label']
+    print(f"Client {i}: {len(labels)} samples, Spam ratio: {labels.mean():.2f}")
 
 # 2. Define the Flower Client
 # --- Researcher's Justification ---
