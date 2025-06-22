@@ -38,8 +38,9 @@ client_data_indices = [
 print(f"Data partitioned for {NUM_CLIENTS} clients.")
 
 # PARÂMETROS DE PRIVACIDADE DIFERENCIAL
-L2_NORM_CLIP = 1.0 
-NOISE_MULTIPLIER = 0.5 
+L2_NORM_CLIP = 5.0
+NOISE_MULTIPLIER = 0.1
+NUM_ROUNDS = 50
 NOISE_STD_DEV = L2_NORM_CLIP * NOISE_MULTIPLIER
 
 # 2. Cliente Flower com Lógica de DP Manual
@@ -147,7 +148,7 @@ print("Starting Manually-Implemented Differentially-Private Federated Learning s
 history = fl.simulation.start_simulation(
     client_fn=client_fn,
     num_clients=NUM_CLIENTS,
-    config=fl.server.ServerConfig(num_rounds=5),
+    config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
     strategy=strategy,
 )
 
